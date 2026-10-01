@@ -103,6 +103,17 @@ func (r *rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 	return int64(col.Precision), int64(declaredScale(col)), true
 }
 
+// ColumnTypeLength reports a text or binary column's length — characters for text, bytes for
+// binary — as the server declares it. Any other type, and a server too old to send the length,
+// reports none.
+func (r *rows) ColumnTypeLength(index int) (length int64, ok bool) {
+	col := r.column(index)
+	if col.Length == nil {
+		return 0, false
+	}
+	return *col.Length, true
+}
+
 func (r *rows) ColumnTypeScanType(index int) reflect.Type {
 	return scanTypeOf(r.column(index))
 }

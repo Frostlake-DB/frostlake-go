@@ -239,7 +239,9 @@ func TestFailedDSNUseKeepsFailing(t *testing.T) {
 		if err == nil {
 			t.Fatalf("statement %d ran anyway, in database %q", attempt, name)
 		}
-		if !strings.Contains(err.Error(), "REG_NO_SUCH_DB") {
+		// The refusal of the DSN's USE: older engines name the database, while current ones answer
+		// as the account does ("Object does not exist, or operation cannot be performed.").
+		if !strings.Contains(err.Error(), "does not exist") {
 			t.Fatalf("statement %d failed for the wrong reason: %v", attempt, err)
 		}
 	}
@@ -583,6 +585,10 @@ func TestMultiStatementScopeChangeIsRestored(t *testing.T) {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	// A pack has to be asked for: a session takes one statement per request until it says otherwise.
+	if _, err := db.Exec("ALTER SESSION SET MULTI_STATEMENT_COUNT = 0"); err != nil {
+		t.Fatal(err)
+	}
 
 	var name string
 	if err := db.QueryRow("SELECT CURRENT_DATABASE()").Scan(&name); err != nil {

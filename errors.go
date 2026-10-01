@@ -22,6 +22,29 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
+// SessionLostError reports that the engine no longer holds the connection's session — it
+// expired, was released, or the server restarted — and that the statement was NOT run, because
+// it depended on something that went with the session: an open transaction, or context set up
+// on it (USE, SET, ALTER SESSION or a temporary object). Re-running it in a fresh session would
+// put it somewhere its author did not intend.
+//
+// The connection stays usable: its next statement starts a fresh session on the DSN's scope. A
+// transaction begun with BeginTx is gone, so the Tx refuses every further statement and its
+// Commit reports this error; Rollback ends it.
+//
+//	var lost *frostlake.SessionLostError
+//	if errors.As(err, &lost) {
+//	    // redo the whole unit of work
+//	}
+type SessionLostError struct {
+	// Message says what went with the session.
+	Message string
+	// Statement is the SQL that was not run, after client-side parameter substitution.
+	Statement string
+}
+
+func (e *SessionLostError) Error() string { return e.Message }
+
 // TransportError is a failure that never became an answer from the engine: the host refused
 // the connection, the context expired, a proxy replied instead, or the body was not a
 // Frostlake response at all. Err carries the underlying cause where there is one.

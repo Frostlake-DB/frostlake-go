@@ -23,8 +23,9 @@ func newStmt(c *conn, query string) *stmt {
 }
 
 // inputCount is what database/sql checks argument counts against. Named placeholders count
-// once each however often they appear. A statement mixing the two styles reports -1 (unknown)
-// so the check is skipped and execution can explain the real problem.
+// once each however often they appear, and a path is no placeholder at all. A statement holding
+// both styles reports -1 (unknown): which of them bind depends on the call's arguments, so the
+// check is left to execution.
 func inputCount(query string) int {
 	positional := 0
 	names := make(map[string]bool)
@@ -119,6 +120,12 @@ func scanPlaceholders(query string) []placeholder {
 				i++
 				continue
 			}
+			// A colon straight after the end of an operand reads a path from it: v:field,
+			// f(x):a, arr[0]:b, "Col":a, $1:a, ?:a. Only a :name that opens an operand can be
+			// a placeholder.
+			if i > 0 && endsOperand(query[i-1]) {
+				continue
+			}
 			j := i + 1
 			for j < len(query) && isWordByte(query[j]) {
 				j++
@@ -132,25 +139,58 @@ func scanPlaceholders(query string) []placeholder {
 	return out
 }
 
+// endsOperand reports whether c can be the last byte of an operand: a name, a number or a
+// $variable, a closing bracket or brace, the closing quote of a literal or quoted identifier,
+// or a ? placeholder.
+func endsOperand(c byte) bool {
+	switch c {
+	case ')', ']', '}', '"', '\'', '?':
+		return true
+	}
+	return isWordByte(c)
+}
+
 // substitute inlines the placeholders with formatted literals — the same client-side binding
 // Frostlake's JDBC driver performs, since the protocol has no server-side binding.
+//
+// A call without arguments has nothing to bind, so its statement is sent exactly as written,
+// as JDBC sends a plain Statement's. Reading it for placeholders anyway mistook the SQL's own
+// syntax for them: v:field is a semi-structured path, :name inside a scripting block reads a
+// variable, and a cursor's ? is bound in the block by OPEN … USING. A ? that nothing binds is
+// still refused, by the engine, with the account's "Bind variable ? not set."
 func substitute(query string, args []driver.NamedValue, loc *time.Location) (string, error) {
-	sites := scanPlaceholders(query)
-	positional, named := 0, 0
-	for _, p := range sites {
+	if len(args) == 0 {
+		return query, nil
+	}
+	var marks, names []placeholder
+	for _, p := range scanPlaceholders(query) {
 		if p.name == "" {
-			positional++
+			marks = append(marks, p)
 		} else {
-			named++
+			names = append(names, p)
 		}
 	}
-	if positional > 0 && named > 0 {
+	// Positional arguments bind the ? placeholders and nothing else. A :name beside them is left
+	// to the engine, which reads one inside a scripting block as the block's own variable.
+	if len(marks) > 0 && !anyNamed(args) {
+		return renderPositional(query, marks, args, loc)
+	}
+	if len(marks) > 0 && len(names) > 0 {
 		return "", errors.New("frostlake: a statement may use ? or :name placeholders, not both")
 	}
-	if named > 0 {
-		return renderNamed(query, sites, args, loc)
+	if len(names) > 0 {
+		return renderNamed(query, names, args, loc)
 	}
-	return renderPositional(query, sites, args, loc)
+	return renderPositional(query, marks, args, loc)
+}
+
+func anyNamed(args []driver.NamedValue) bool {
+	for _, a := range args {
+		if a.Name != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func renderPositional(query string, sites []placeholder, args []driver.NamedValue, loc *time.Location) (string, error) {

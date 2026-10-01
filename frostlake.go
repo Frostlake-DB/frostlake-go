@@ -21,7 +21,9 @@
 // Statement parameters are inlined client-side (there is no server-side binding), exactly
 // like Frostlake's JDBC driver: strings are quoted with backslash and quote escaping,
 // []byte binds as a hex BINARY literal, time.Time as a TIMESTAMP_NTZ literal in loc.
-// Both positional (?) and named (:name) placeholders are supported, one style per statement.
+// Both positional (?) and named (:name) placeholders are supported: positional arguments bind
+// only ?, named ones only :name. A colon glued to the end of an operand (v:field, f(x):a, ?:a)
+// reads a semi-structured path and is never a placeholder.
 package frostlake
 
 import (

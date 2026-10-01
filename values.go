@@ -11,9 +11,11 @@ import (
 	"time"
 )
 
-// The layouts the engine emits. TIME arrives without a fractional part and TIMESTAMP_LTZ/TZ
-// carry a numeric offset; the fractional and T-separated variants are accepted anyway, so a
-// server that spells them with more precision still parses.
+// The layouts the engine emits. A timestamp carries three, six or nine fractional digits, as
+// many as its value needs, and a TIME carries the same when it has a fraction and none on a whole
+// second. TIMESTAMP_LTZ/TZ add a ±HHMM offset. The layouts read a fraction of up to nine digits,
+// or none, so an engine before 0.1.0, which cuts a timestamp to the millisecond and a TIME to the
+// second, parses too; the T-separated and colon-offset variants are accepted anyway.
 var (
 	dateLayouts  = []string{"2006-01-02"}
 	timeLayouts  = []string{"15:04:05.999999999", "15:04:05"}
@@ -122,20 +124,108 @@ func parseTemporal(text string, kind temporalKind, loc *time.Location) (time.Tim
 	default:
 		return time.Time{}, fmt.Errorf("frostlake: %q is not a temporal value", text)
 	}
+	if kind != timeKind {
+		if year, rest, ok := splitYear(text); ok {
+			// Read in UTC, whose clock has no gaps: loc's daylight-saving rules for the stand-in
+			// year would move a wall clock the real year keeps. withYear places it in loc.
+			if t, hasOffset, ok := parseLayouts(rest, kind, layouts, time.UTC); ok {
+				if t, ok := withYear(t, year, hasOffset, loc); ok {
+					return t, nil
+				}
+			}
+			return time.Time{}, cannotRead(text, kind)
+		}
+	}
+	if t, _, ok := parseLayouts(text, kind, layouts, loc); ok {
+		return t, nil
+	}
+	return time.Time{}, cannotRead(text, kind)
+}
+
+func cannotRead(text string, kind temporalKind) error {
+	return fmt.Errorf("frostlake: cannot read %q as a %s value", text, typeNameOf(kind))
+}
+
+// parseLayouts tries a kind's layouts in turn, and reports whether the one that matched read an
+// offset from the text.
+func parseLayouts(text string, kind temporalKind, layouts []string, loc *time.Location) (t time.Time, hasOffset, ok bool) {
 	for _, layout := range layouts {
 		if t, err := time.ParseInLocation(layout, text, loc); err == nil {
-			return t, nil
+			return t, kind == zonedKind, true
 		}
 	}
 	// A zoned column whose value arrived without an offset is still readable as a wall clock.
 	if kind == zonedKind {
 		for _, layout := range naiveLayouts {
 			if t, err := time.ParseInLocation(layout, text, loc); err == nil {
-				return t, nil
+				return t, false, true
 			}
 		}
 	}
-	return time.Time{}, fmt.Errorf("frostlake: cannot read %q as a %s value", text, typeNameOf(kind))
+	return time.Time{}, false, false
+}
+
+// maxYearDigits is the widest year a Frostlake engine can hold (java.time stops at
+// ±999,999,999). time.Time holds every one of them exactly.
+const maxYearDigits = 9
+
+// standInYear takes the place of a year the layouts cannot read. It is a leap year, so the text's
+// 29 February parses too; withYear then checks that the real year has one.
+const standInYear = "2000"
+
+// splitYear separates the year from a temporal text when Go's four-digit year field cannot read
+// it: a year past 9999, which the engine prints in full as the account does ("12000-01-01"), or a
+// signed year — the account's spelling of a year before 1 ("-1-01-15"), and java.time's padded
+// one ("-0001-01-01", "+20201-01-15"). It returns the year and the text with the stand-in year in
+// its place. A plain four-digit year, and a text that does not open with a year, report ok=false.
+func splitYear(text string) (year int, rest string, ok bool) {
+	i := 0
+	signed := i < len(text) && (text[i] == '+' || text[i] == '-')
+	if signed {
+		i++
+	}
+	start := i
+	for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+		i++
+	}
+	digits := i - start
+	if digits == 0 || digits > maxYearDigits || i == len(text) || text[i] != '-' {
+		return 0, "", false
+	}
+	if !signed && digits <= 4 {
+		return 0, "", false
+	}
+	year, err := strconv.Atoi(text[start:i])
+	if err != nil {
+		return 0, "", false
+	}
+	if text[0] == '-' {
+		year = -year
+	}
+	return year, standInYear + text[i:], true
+}
+
+// withYear moves a value parsed under the stand-in year to its real year, keeping what the text
+// said: its wall clock, and its offset when it wrote one. A value without an offset is a wall
+// clock in loc. A value with one names an instant, placed by that offset; as
+// time.ParseInLocation does, it lands in loc when loc keeps that offset at that instant, and in a
+// zone fixed at the offset otherwise. It reports false for a 29 February in a year that has none.
+func withYear(parsed time.Time, year int, hasOffset bool, loc *time.Location) (time.Time, bool) {
+	wall := time.Date(year, parsed.Month(), parsed.Day(), parsed.Hour(), parsed.Minute(),
+		parsed.Second(), parsed.Nanosecond(), time.UTC)
+	if wall.Month() != parsed.Month() || wall.Day() != parsed.Day() {
+		return time.Time{}, false
+	}
+	if !hasOffset {
+		return time.Date(year, parsed.Month(), parsed.Day(), parsed.Hour(), parsed.Minute(),
+			parsed.Second(), parsed.Nanosecond(), loc), true
+	}
+	_, offset := parsed.Zone()
+	instant := wall.Add(-time.Duration(offset) * time.Second)
+	if _, inLoc := instant.In(loc).Zone(); inLoc == offset {
+		return instant.In(loc), true
+	}
+	return instant.In(time.FixedZone("", offset)), true
 }
 
 func typeNameOf(kind temporalKind) string {
