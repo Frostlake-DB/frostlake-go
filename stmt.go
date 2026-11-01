@@ -320,8 +320,11 @@ func skipDollarQuoted(s string, i int) int {
 	return len(s)
 }
 
+// skipLine returns the index just past the line end that closes the line comment starting at
+// i. The comment ends at a line feed or a carriage return, whichever comes first, as the
+// lexer's LINE_COMMENT does: ('--' | '//') ~[\r\n]*.
 func skipLine(s string, i int) int {
-	if j := strings.IndexByte(s[i:], '\n'); j >= 0 {
+	if j := strings.IndexAny(s[i:], "\r\n"); j >= 0 {
 		return i + j + 1
 	}
 	return len(s)
@@ -366,7 +369,7 @@ func formatLiteral(v driver.Value, loc *time.Location) (string, error) {
 	case bool:
 		return strconv.FormatBool(x), nil
 	case int64:
-		return strconv.FormatInt(x, 10), nil
+		return numberLiteral(strconv.FormatInt(x, 10)), nil
 	case float64:
 		// FormatFloat spells these NaN, +Inf and -Inf, which the parser reads as identifiers.
 		switch {
@@ -377,7 +380,7 @@ func formatLiteral(v driver.Value, loc *time.Location) (string, error) {
 		case math.IsInf(x, -1):
 			return "'-Inf'::FLOAT", nil
 		}
-		return strconv.FormatFloat(x, 'g', -1, 64), nil
+		return numberLiteral(strconv.FormatFloat(x, 'g', -1, 64)), nil
 	case string:
 		return encodeString(x), nil
 	case []byte:
@@ -393,4 +396,15 @@ func formatLiteral(v driver.Value, loc *time.Location) (string, error) {
 	default:
 		return "", fmt.Errorf("frostlake: unsupported parameter type %T", v)
 	}
+}
+
+// numberLiteral puts a negative number in parentheses, which is one value wherever it lands:
+// bare, 3-? would become 3--5, a line comment, and ?::VARCHAR would cast before it negates. The
+// rendered text decides rather than a sign test, so a float negative zero, written -0, is
+// wrapped too.
+func numberLiteral(text string) string {
+	if strings.HasPrefix(text, "-") {
+		return "(" + text + ")"
+	}
+	return text
 }

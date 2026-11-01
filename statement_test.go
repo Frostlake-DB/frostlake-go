@@ -27,6 +27,8 @@ func TestCountPlaceholders(t *testing.T) {
 		`SELECT "a?b"`:                   0,
 		"SELECT 1 -- a ? here\n, ?":      1,
 		"SELECT 1 // a ? here\n, ?":      1,
+		"SELECT 1 -- a ? here\r, ?":      1,
+		"SELECT 1 AS a$$b, ?":            1,
 		"SELECT /* a ? here */ ?":        1,
 		"SELECT $$a?b$$":                 0,
 		"SELECT $$a?b$$, ?":              1,
@@ -156,6 +158,38 @@ func TestSubstitute(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("substitute(%q) = %q, want %q", c.query, got, c.want)
+		}
+	}
+}
+
+// A negative number binds in parentheses: bare, 3-? became 3--5, which the lexer reads as 3
+// and a line comment, and ?::VARCHAR became -5::VARCHAR, which casts before it negates. The
+// scanner reads the text as the lexer does: the $$ inside the name a$$b opens no body, and a
+// line comment ends at a carriage return as well as at a line feed.
+func TestSubstituteReadsTheStatementAsTheLexerDoes(t *testing.T) {
+	cases := []struct {
+		query string
+		arg   driver.Value
+		want  string
+	}{
+		{"SELECT 3-?", int64(-5), "SELECT 3-(-5)"},
+		{"SELECT ?::VARCHAR", int64(-5), "SELECT (-5)::VARCHAR"},
+		{"SELECT 1 AS a$$b, ?", int64(7), "SELECT 1 AS a$$b, 7"},
+		{"SELECT 1 -- c\r, ?", int64(7), "SELECT 1 -- c\r, 7"},
+		{"SELECT 1 // c\r, ?", int64(7), "SELECT 1 // c\r, 7"},
+		{"SELECT 3-?", -2.5, "SELECT 3-(-2.5)"},
+		{"SELECT 3-?", int64(math.MinInt64), "SELECT 3-(-9223372036854775808)"},
+		{"SELECT 3-?", math.Copysign(0, -1), "SELECT 3-(-0)"},
+		{"SELECT 3-?", int64(5), "SELECT 3-5"},
+	}
+	for _, c := range cases {
+		got, err := substitute(c.query, named([]driver.Value{c.arg}), time.UTC)
+		if err != nil {
+			t.Errorf("substitute(%q, %v): %v", c.query, c.arg, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("substitute(%q, %v) = %q, want %q", c.query, c.arg, got, c.want)
 		}
 	}
 }
@@ -418,8 +452,11 @@ func TestFormatLiteral(t *testing.T) {
 	}{
 		{nil, "NULL"},
 		{true, "true"},
-		{int64(-5), "-5"},
+		{int64(-5), "(-5)"},
+		{int64(math.MinInt64), "(-9223372036854775808)"},
 		{1.5, "1.5"},
+		{-2.5, "(-2.5)"},
+		{math.Copysign(0, -1), "(-0)"},
 		{"it's", "'it''s'"},
 		{[]byte{0xde, 0xad}, "X'dead'"},
 		{math.NaN(), "'NaN'::FLOAT"},

@@ -27,6 +27,7 @@ func TestLeadingWords(t *testing.T) {
 			[]string{"CREATE", "OR", "REPLACE", "DATABASE", "D"}},
 		{"/* c */ alter session set x", []string{"ALTER", "SESSION", "SET", "X"}},
 		{"// line\ndrop table t", []string{"DROP", "TABLE", "T"}},
+		{"-- line\ruse database x", []string{"USE", "DATABASE", "X"}},
 		{"", nil},
 		{"(SELECT 1)", nil},
 		{"/* unterminated", nil},
@@ -57,6 +58,8 @@ func TestSplitStatements(t *testing.T) {
 		`SELECT "a;b"`:                 1,
 		"SELECT $$a;b$$":               1,
 		"SELECT 1 -- ;\n":              1,
+		"SELECT 1 -- c\r; SELECT 2":    2,
+		"SELECT 1 AS a$$b; SELECT 2":   2,
 		"SELECT /* ; */ 1":             1,
 		"SELECT 1;":                    2,
 	}
